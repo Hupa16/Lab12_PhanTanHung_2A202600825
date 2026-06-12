@@ -1,8 +1,8 @@
 #  Delivery Checklist — Day 12 Lab Submission
 
-> **Student Name:** _________________________  
-> **Student ID:** _________________________  
-> **Date:** _________________________
+> **Student Name:** Phan Tan Hung  
+> **Student ID:** 2A202600825  
+> **Date:** 12/06/2026
 
 ---
 
@@ -20,46 +20,51 @@ Create a file `MISSION_ANSWERS.md` with your answers to all exercises:
 ## Part 1: Localhost vs Production
 
 ### Exercise 1.1: Anti-patterns found
-1. [Your answer]
-2. [Your answer]
-...
+1. Hardcoded Secrets (API Key, Database URL)
+2. Thiếu Quản lý Cấu hình (Configuration Management)
+3. Sử dụng print() thay vì Structured Logging
+4. Không có Health Check Endpoints
+5. Ghi cứng Host và Port
 
 ### Exercise 1.3: Comparison table
 | Feature | Develop | Production | Why Important? |
 |---------|---------|------------|----------------|
-| Config  | ...     | ...        | ...            |
-...
+| Config  | Hardcode tĩnh | Load động qua env vars | Cho phép thay đổi cấu hình linh hoạt |
+| Health Check | Không có | Có endpoint /health | Giúp orchestration tự động phục hồi lỗi |
 
 ## Part 2: Docker
 
 ### Exercise 2.1: Dockerfile questions
-1. Base image: [Your answer]
-2. Working directory: [Your answer]
-...
+1. Base image: python:3.11-slim
+2. Working directory: /app
 
 ### Exercise 2.3: Image size comparison
-- Develop: [X] MB
-- Production: [Y] MB
-- Difference: [Z]%
+- Develop: 1025 MB
+- Production: 235 MB
+- Difference: Tiết kiệm 77%
 
 ## Part 3: Cloud Deployment
 
 ### Exercise 3.1: Railway deployment
-- URL: https://your-app.railway.app
-- Screenshot: [Link to screenshot in repo]
+- URL: https://trustworthy-light-production-e86f.up.railway.app
+- Screenshot: screenshots/dashboard.png
 
 ## Part 4: API Security
 
 ### Exercise 4.1-4.3: Test results
-[Paste your test outputs]
+- Không API Key: HTTP 401 Unauthorized
+- Có API Key: HTTP 200 OK
+- Rate Limiting: HTTP 429 Too Many Requests
 
 ### Exercise 4.4: Cost guard implementation
-[Explain your approach]
+- Tính toán token in/out, quy đổi ra USD. Lưu tổng tiêu thụ trong ngày vào hệ thống và block bằng HTTP 402 nếu quá ngân sách.
 
 ## Part 5: Scaling & Reliability
 
 ### Exercise 5.1-5.5: Implementation notes
-[Your explanations and test results]
+- Health check: endpoint /health và /ready.
+- Graceful shutdown: Bắt SIGTERM, chờ 30s hoàn tất request.
+- Stateless design: Dùng Redis lưu phiên chat và rate limit, thay cho in-memory.
 ```
 
 ---
