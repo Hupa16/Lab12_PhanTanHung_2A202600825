@@ -28,11 +28,26 @@ from fastapi.security.api_key import APIKeyHeader
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import uvicorn
+import redis
 
 from app.config import settings
 
 # Mock LLM (thay bằng OpenAI/Anthropic khi có API key)
 from utils.mock_llm import ask as llm_ask
+
+# ─────────────────────────────────────────────────────────
+# Redis backing store configuration
+# ─────────────────────────────────────────────────────────
+try:
+    # Use redis_url from settings
+    _redis = redis.from_url(settings.redis_url, decode_responses=True)
+    _redis.ping()
+    USE_REDIS = True
+    logging.info("Connected to Redis successfully.")
+except Exception as e:
+    USE_REDIS = False
+    _redis = None
+    logging.warning(f"Redis not available ({e}) — falling back to in-memory store.")
 
 # ─────────────────────────────────────────────────────────
 # Logging — JSON structured
@@ -49,12 +64,44 @@ _request_count = 0
 _error_count = 0
 
 # ─────────────────────────────────────────────────────────
-# Simple In-memory Rate Limiter
+# Redis & In-memory Rate Limiter (Sliding Window ZSET)
 # ─────────────────────────────────────────────────────────
 _rate_windows: dict[str, deque] = defaultdict(deque)
 
 def check_rate_limit(key: str):
-    now = time.time()
+    if USE_REDIS:
+        now = time.time()
+        redis_key = f"rate_limit:{key}"
+        try:
+            # Clean up old timestamps (outside of 60 seconds)
+            _redis.zremrangebyscore(redis_key, 0, now - 60)
+            # Count remaining
+            count = _redis.zcard(redis_key)
+            if count >= settings.rate_limit_per_minute:
+                # Retrieve the oldest timestamp in the window
+                oldest_item = _redis.zrange(redis_key, 0, 0, withscores=True)
+                retry_after = 60
+                if oldest_item:
+                    oldest_ts = oldest_item[0][1]
+                    retry_after = max(1, int(oldest_ts + 60 - now))
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"Rate limit exceeded: {settings.rate_limit_per_minute} req/min",
+                    headers={"Retry-After": str(retry_after)},
+                )
+            # Record request
+            _redis.zadd(redis_key, {str(now): now})
+            _redis.expire(redis_key, 60)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Redis rate limit failed ({e}) — falling back to memory.")
+            # Fallback inline memory rate limiter
+            _run_in_memory_rate_limit(key, now)
+    else:
+        _run_in_memory_rate_limit(key, time.time())
+
+def _run_in_memory_rate_limit(key: str, now: float):
     window = _rate_windows[key]
     while window and window[0] < now - 60:
         window.popleft()
@@ -67,20 +114,59 @@ def check_rate_limit(key: str):
     window.append(now)
 
 # ─────────────────────────────────────────────────────────
-# Simple Cost Guard
+# Redis & In-memory Cost Guard
 # ─────────────────────────────────────────────────────────
+PRICE_PER_1K_INPUT_TOKENS = 0.00015
+PRICE_PER_1K_OUTPUT_TOKENS = 0.0006
+
 _daily_cost = 0.0
 _cost_reset_day = time.strftime("%Y-%m-%d")
 
-def check_and_record_cost(input_tokens: int, output_tokens: int):
+def check_and_record_cost(input_tokens: int, output_tokens: int, user_id: str = "global"):
     global _daily_cost, _cost_reset_day
     today = time.strftime("%Y-%m-%d")
+    cost = (input_tokens / 1000) * PRICE_PER_1K_INPUT_TOKENS + (output_tokens / 1000) * PRICE_PER_1K_OUTPUT_TOKENS
+    
+    if USE_REDIS:
+        redis_key = f"cost:{user_id}:{today}"
+        try:
+            current_cost = float(_redis.get(redis_key) or 0.0)
+            if current_cost + cost > settings.daily_budget_usd:
+                raise HTTPException(
+                    status_code=402,
+                    detail={
+                        "error": "Daily budget exceeded",
+                        "used_usd": current_cost,
+                        "budget_usd": settings.daily_budget_usd,
+                        "resets_at": "midnight UTC"
+                    }
+                )
+            if cost > 0:
+                _redis.incrbyfloat(redis_key, cost)
+                _redis.expire(redis_key, 86400) # 1 day expiration
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Redis cost guard failed ({e}) — falling back to memory.")
+            _run_in_memory_cost_guard(cost, today)
+    else:
+        _run_in_memory_cost_guard(cost, today)
+
+def _run_in_memory_cost_guard(cost: float, today: str):
+    global _daily_cost, _cost_reset_day
     if today != _cost_reset_day:
         _daily_cost = 0.0
         _cost_reset_day = today
-    if _daily_cost >= settings.daily_budget_usd:
-        raise HTTPException(503, "Daily budget exhausted. Try tomorrow.")
-    cost = (input_tokens / 1000) * 0.00015 + (output_tokens / 1000) * 0.0006
+    if _daily_cost + cost > settings.daily_budget_usd:
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "error": "Daily budget exceeded",
+                "used_usd": _daily_cost,
+                "budget_usd": settings.daily_budget_usd,
+                "resets_at": "midnight UTC"
+            }
+        )
     _daily_cost += cost
 
 # ─────────────────────────────────────────────────────────
@@ -201,12 +287,13 @@ async def ask_agent(
 
     **Authentication:** Include header `X-API-Key: <your-key>`
     """
+    user_bucket = _key[:8]
     # Rate limit per API key
-    check_rate_limit(_key[:8])  # use first 8 chars as key bucket
+    check_rate_limit(user_bucket)
 
     # Budget check
     input_tokens = len(body.question.split()) * 2
-    check_and_record_cost(input_tokens, 0)
+    check_and_record_cost(input_tokens, 0, user_bucket)
 
     logger.info(json.dumps({
         "event": "agent_call",
@@ -214,10 +301,30 @@ async def ask_agent(
         "client": str(request.client.host) if request.client else "unknown",
     }))
 
+    # Storing chat history in Redis list for stateless tracking
+    history_key = f"history:{user_bucket}"
+    if USE_REDIS:
+        try:
+            # Optionally log history loading if needed
+            pass
+        except Exception as e:
+            logger.error(f"Failed to interact with Redis chat history: {e}")
+
     answer = llm_ask(body.question)
 
+    # Save to Redis
+    if USE_REDIS:
+        try:
+            _redis.rpush(history_key, json.dumps({"role": "user", "content": body.question, "ts": datetime.now(timezone.utc).isoformat()}))
+            _redis.rpush(history_key, json.dumps({"role": "assistant", "content": answer, "ts": datetime.now(timezone.utc).isoformat()}))
+            # Keep last 20 messages only (10 turns)
+            _redis.ltrim(history_key, -20, -1)
+            _redis.expire(history_key, 3600) # 1 hour TTL
+        except Exception as e:
+            logger.error(f"Failed to save chat history to Redis: {e}")
+
     output_tokens = len(answer.split()) * 2
-    check_and_record_cost(0, output_tokens)
+    check_and_record_cost(0, output_tokens, user_bucket)
 
     return AskResponse(
         question=body.question,
@@ -248,19 +355,36 @@ def ready():
     """Readiness probe. Load balancer stops routing here if not ready."""
     if not _is_ready:
         raise HTTPException(503, "Not ready")
+    if USE_REDIS:
+        try:
+            _redis.ping()
+        except Exception as e:
+            logger.error(f"Readiness check failed: Redis ping failed: {e}")
+            raise HTTPException(503, "Redis not available")
     return {"ready": True}
 
 
 @app.get("/metrics", tags=["Operations"])
 def metrics(_key: str = Depends(verify_api_key)):
     """Basic metrics (protected)."""
+    user_bucket = _key[:8]
+    today = time.strftime("%Y-%m-%d")
+    if USE_REDIS:
+        try:
+            redis_key = f"cost:{user_bucket}:{today}"
+            cost = float(_redis.get(redis_key) or 0.0)
+        except Exception:
+            cost = _daily_cost
+    else:
+        cost = _daily_cost
+
     return {
         "uptime_seconds": round(time.time() - START_TIME, 1),
         "total_requests": _request_count,
         "error_count": _error_count,
-        "daily_cost_usd": round(_daily_cost, 4),
+        "daily_cost_usd": round(cost, 4),
         "daily_budget_usd": settings.daily_budget_usd,
-        "budget_used_pct": round(_daily_cost / settings.daily_budget_usd * 100, 1),
+        "budget_used_pct": round(cost / settings.daily_budget_usd * 100, 1) if settings.daily_budget_usd > 0 else 0.0,
     }
 
 
