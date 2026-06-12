@@ -1,3 +1,11 @@
+#  Delivery Checklist — Day 12 Lab Submission
+
+> **Student Name:** Phan Tan Hung
+> **Student ID:** 2A202600825
+> **Date:** 12/06/2026
+
+---
+
 # Day 12 Lab - Mission Answers
 
 ## Part 1: Localhost vs Production

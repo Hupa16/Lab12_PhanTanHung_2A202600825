@@ -7,5 +7,6 @@ venv/
 .venv/
 .git/
 *.md
+!ai_chat_system_prompt.md
 tests/
 .DS_Store

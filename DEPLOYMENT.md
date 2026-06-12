@@ -1,7 +1,14 @@
+#  Delivery Checklist — Day 12 Lab Submission
+
+> **Student Name:** Phan Tan Hung
+> **Student ID:** 2A202600825
+> **Date:** 12/06/2026
+
+---
 # Deployment Information
 
 ## Public URL
-https://lab12-production-agent.up.railway.app
+https://lab12deloy-production.up.railway.app
 
 ## Platform
 Railway
@@ -10,13 +17,13 @@ Railway
 
 ### Health Check
 ```bash
-curl https://lab12-production-agent.up.railway.app/health
+curl https://lab12deloy-production.up.railway.app/health
 # Expected: {"status":"ok","version":"1.0.0",...}
 ```
 
 ### API Test (with authentication)
 ```bash
-curl -X POST https://lab12-production-agent.up.railway.app/ask \
+curl -X POST https://lab12deloy-production.up.railway.app/ask \
   -H "X-API-Key: dev-key-change-me" \
   -H "Content-Type: application/json" \
   -d '{"question": "Hello"}'
